@@ -73,7 +73,7 @@ TeleForward is a Python-based Telegram bot that automatically forwards and curat
    API_ID = 'your_api_id'
    API_HASH = 'your_api_hash'
    SOURCE_CHANNEL_IDS = [channel_id1, channel_id2, channel_id3]
-   TARGET_CHANNEL_ID = target_channel_id
+   TARGET_CHANNEL_IDS = target_channel_id
    ```
    Save and exit (Ctrl+X, then Y, then Enter).
 
