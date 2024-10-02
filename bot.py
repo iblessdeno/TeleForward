@@ -6,7 +6,7 @@ import os
 import re
 from datetime import datetime, timedelta
 from io import BytesIO
-from credentials import API_ID, API_HASH, SOURCE_CHANNEL_IDS, TARGET_CHANNEL_ID
+from credentials import API_ID, API_HASH, SOURCE_CHANNEL_IDS, TARGET_CHANNEL_IDS
 
 from telethon import TelegramClient, events
 from telethon.tl.types import InputPeerChannel, InputPeerUser, MessageMediaPhoto, MessageMediaDocument, InputMediaUploadedPhoto, MessageMediaWebPage
@@ -62,8 +62,9 @@ async def process_message(message):
         if isinstance(message.media, MessageMediaWebPage):
             # If it's a web page preview, treat it as a text-only message
             if cleaned_text:
-                await client.send_message(TARGET_CHANNEL_ID, cleaned_text)
-                logger.info(f"Forwarded cleaned text message (removed web preview): {cleaned_text[:30]}...")
+                for target_id in TARGET_CHANNEL_IDS:
+                    await client.send_message(target_id, cleaned_text)
+                logger.info(f"Forwarded cleaned text message (removed web preview) to {len(TARGET_CHANNEL_IDS)} channels: {cleaned_text[:30]}...")
             else:
                 logger.info("Message was empty after cleaning and removing web preview, skipped")
             return
@@ -78,30 +79,34 @@ async def process_message(message):
                     # Send as compressed photo
                     uploaded_file = await client.upload_file(media_file, part_size_kb=512)
                     uploaded_media = InputMediaUploadedPhoto(uploaded_file)
-                    await client.send_file(
-                        TARGET_CHANNEL_ID,
-                        file=uploaded_media,
-                        caption=cleaned_text
-                    )
+                    for target_id in TARGET_CHANNEL_IDS:
+                        await client.send_file(
+                            target_id,
+                            file=uploaded_media,
+                            caption=cleaned_text
+                        )
                 else:
                     # For other types of media, send as is
-                    await client.send_file(
-                        TARGET_CHANNEL_ID,
-                        file=media_file,
-                        caption=cleaned_text
-                    )
-                logger.info(f"Forwarded media message with cleaned caption: {cleaned_text[:30] if cleaned_text else 'No caption'}...")
+                    for target_id in TARGET_CHANNEL_IDS:
+                        await client.send_file(
+                            target_id,
+                            file=media_file,
+                            caption=cleaned_text
+                        )
+                logger.info(f"Forwarded media message with cleaned caption to {len(TARGET_CHANNEL_IDS)} channels: {cleaned_text[:30] if cleaned_text else 'No caption'}...")
             else:
                 logger.warning("Failed to download media, sending as text-only message")
                 if cleaned_text:
-                    await client.send_message(TARGET_CHANNEL_ID, cleaned_text)
-                    logger.info(f"Forwarded cleaned text message: {cleaned_text[:30]}...")
+                    for target_id in TARGET_CHANNEL_IDS:
+                        await client.send_message(target_id, cleaned_text)
+                    logger.info(f"Forwarded cleaned text message to {len(TARGET_CHANNEL_IDS)} channels: {cleaned_text[:30]}...")
                 else:
                     logger.info("Message was empty after cleaning, skipped")
         elif cleaned_text:
             # If it's a text-only message and there's content after cleaning, send it
-            await client.send_message(TARGET_CHANNEL_ID, cleaned_text)
-            logger.info(f"Forwarded cleaned text message: {cleaned_text[:30]}...")
+            for target_id in TARGET_CHANNEL_IDS:
+                await client.send_message(target_id, cleaned_text)
+            logger.info(f"Forwarded cleaned text message to {len(TARGET_CHANNEL_IDS)} channels: {cleaned_text[:30]}...")
         else:
             logger.info("Message was empty after cleaning or had no content, skipped")
     except Exception as e:
@@ -160,18 +165,19 @@ async def main():
     SOURCE_CHANNEL_IDS = valid_source_channels
 
     try:
-        target_channel = await client.get_entity(TARGET_CHANNEL_ID)
-        logger.info(f"Target channel: {target_channel.title}")
+        for target_id in TARGET_CHANNEL_IDS:
+            target_channel = await client.get_entity(target_id)
+            logger.info(f"Target channel: {target_channel.title}")
     except ValueError as e:
         logger.error(f"Error resolving target channel: {e}")
-        logger.info("Make sure you have access to the target channel and the ID is correct.")
+        logger.info("Make sure you have access to all target channels and the IDs are correct.")
         return
     except Exception as e:
         logger.error(f"Unexpected error resolving target channel: {e}")
         return
 
     logger.info(f"Listening for messages in channels: {valid_source_channels}")
-    logger.info(f"Forwarding messages to channel: {TARGET_CHANNEL_ID}")
+    logger.info(f"Forwarding messages to channels: {TARGET_CHANNEL_IDS}")
 
     # Set up the event handler for new messages
     @client.on(events.NewMessage(chats=SOURCE_CHANNEL_IDS))
