@@ -4,6 +4,7 @@ import nest_asyncio
 import logging
 import os
 import re
+import mimetypes
 from datetime import datetime, timedelta
 from io import BytesIO
 from credentials import API_ID, API_HASH, SOURCE_CHANNEL_IDS, TARGET_CHANNEL_IDS
@@ -75,6 +76,15 @@ def contains_forbidden_words(text, channel_name):
     
     return False
 
+def get_file_extension(media):
+    if isinstance(media, MessageMediaPhoto):
+        return '.jpg'
+    elif isinstance(media, MessageMediaDocument):
+        mime_type = media.document.mime_type
+        extension = mimetypes.guess_extension(mime_type)
+        return extension if extension else '.bin'
+    return ''
+
 async def process_message(message):
     try:
         # Clean the text content
@@ -89,59 +99,99 @@ async def process_message(message):
             logger.info(f"Message contains forbidden words or channel name, skipped: {cleaned_text[:30]}...")
             return
         
-        # Check if the message has a web page preview
-        if isinstance(message.media, MessageMediaWebPage):
-            # If it's a web page preview, treat it as a text-only message
-            if cleaned_text:
-                for target_id in TARGET_CHANNEL_IDS:
-                    await client.send_message(target_id, cleaned_text)
-                logger.info(f"Forwarded cleaned text message (removed web preview) to {len(TARGET_CHANNEL_IDS)} channels: {cleaned_text[:30]}...")
-            else:
-                logger.info("Message was empty after cleaning and removing web preview, skipped")
-            return
-
-        if message.media and not isinstance(message.media, MessageMediaWebPage):
-            # Download the media
-            media_file = await message.download_media(file=BytesIO())
-            
-            if media_file:
-                media_file.seek(0)
-                if isinstance(message.media, MessageMediaPhoto):
-                    # Send as compressed photo
-                    uploaded_file = await client.upload_file(media_file, part_size_kb=512)
-                    uploaded_media = InputMediaUploadedPhoto(uploaded_file)
-                elif isinstance(message.media, MessageMediaDocument):
-                    # Send as compressed document (video, gif, etc.)
-                    attributes = message.media.document.attributes
-                    uploaded_file = await client.upload_file(media_file, part_size_kb=512)
-                    uploaded_media = InputMediaUploadedDocument(
-                        file=uploaded_file,
-                        mime_type=message.media.document.mime_type,
-                        attributes=attributes,
-                        force_file=False
-                    )
+        # Handle messages with media
+        if message.media:
+            # Check if it's a grouped media message
+            if hasattr(message, 'grouped_id'):
+                # For grouped media, we need to get all related messages
+                chat = await message.get_chat()
+                grouped_messages = await client.get_messages(chat, min_id=message.id-10, max_id=message.id+10)
+                grouped_messages = [msg for msg in grouped_messages if msg.grouped_id == message.grouped_id]
+                media_group = []
+                group_text = ""
+                for msg in grouped_messages:
+                    if msg.text:
+                        group_text += remove_usernames_and_links(msg.text) + "\n\n"
+                    if msg.media and not isinstance(msg.media, MessageMediaWebPage):
+                        file_extension = get_file_extension(msg.media)
+                        media_file = await msg.download_media(file=BytesIO(), thumb=-1)
+                        if media_file:
+                            media_file.seek(0)
+                            if isinstance(msg.media, MessageMediaPhoto):
+                                uploaded_file = await client.upload_file(media_file, file_name=f'photo{file_extension}')
+                                media_group.append(InputMediaUploadedPhoto(uploaded_file))
+                            elif isinstance(msg.media, MessageMediaDocument):
+                                attributes = msg.media.document.attributes
+                                uploaded_file = await client.upload_file(media_file, file_name=f'document{file_extension}')
+                                media_group.append(InputMediaUploadedDocument(
+                                    file=uploaded_file,
+                                    mime_type=msg.media.document.mime_type,
+                                    attributes=attributes,
+                                    force_file=False
+                                ))
+                
+                # Send the grouped media
+                if media_group:
+                    for target_id in TARGET_CHANNEL_IDS:
+                        await client.send_file(
+                            target_id,
+                            file=media_group,
+                            caption=group_text.strip(),
+                            force_document=False
+                        )
+                    logger.info(f"Forwarded grouped media message ({len(media_group)} items) with cleaned caption to {len(TARGET_CHANNEL_IDS)} channels: {group_text[:30] if group_text else 'No caption'}...")
                 else:
-                    # For other types of media, send as is
-                    uploaded_media = media_file
+                    logger.warning("No valid media found in grouped message")
+            
+            # Handle single media message
+            elif not isinstance(message.media, MessageMediaWebPage):
+                file_extension = get_file_extension(message.media)
+                media_file = await message.download_media(file=BytesIO(), thumb=-1)
+                if media_file:
+                    media_file.seek(0)
+                    if isinstance(message.media, MessageMediaPhoto):
+                        uploaded_file = await client.upload_file(media_file, file_name=f'photo{file_extension}')
+                        uploaded_media = InputMediaUploadedPhoto(uploaded_file)
+                    elif isinstance(message.media, MessageMediaDocument):
+                        attributes = message.media.document.attributes
+                        uploaded_file = await client.upload_file(media_file, file_name=f'document{file_extension}')
+                        uploaded_media = InputMediaUploadedDocument(
+                            file=uploaded_file,
+                            mime_type=message.media.document.mime_type,
+                            attributes=attributes,
+                            force_file=False
+                        )
+                    else:
+                        uploaded_media = media_file
 
-                for target_id in TARGET_CHANNEL_IDS:
-                    await client.send_file(
-                        target_id,
-                        file=uploaded_media,
-                        caption=cleaned_text,
-                        force_document=False
-                    )
-                logger.info(f"Forwarded compressed media message with cleaned caption to {len(TARGET_CHANNEL_IDS)} channels: {cleaned_text[:30] if cleaned_text else 'No caption'}...")
-            else:
-                logger.warning("Failed to download media, sending as text-only message")
+                    for target_id in TARGET_CHANNEL_IDS:
+                        await client.send_file(
+                            target_id,
+                            file=uploaded_media,
+                            caption=cleaned_text,
+                            force_document=False
+                        )
+                    logger.info(f"Forwarded single media message with cleaned caption to {len(TARGET_CHANNEL_IDS)} channels: {cleaned_text[:30] if cleaned_text else 'No caption'}...")
+                else:
+                    logger.warning("Failed to download media, sending as text-only message")
+                    if cleaned_text:
+                        for target_id in TARGET_CHANNEL_IDS:
+                            await client.send_message(target_id, cleaned_text)
+                        logger.info(f"Forwarded cleaned text message to {len(TARGET_CHANNEL_IDS)} channels: {cleaned_text[:30]}...")
+                    else:
+                        logger.info("Message was empty after cleaning, skipped")
+            
+            # Handle web page preview as text-only message
+            elif isinstance(message.media, MessageMediaWebPage):
                 if cleaned_text:
                     for target_id in TARGET_CHANNEL_IDS:
                         await client.send_message(target_id, cleaned_text)
-                    logger.info(f"Forwarded cleaned text message to {len(TARGET_CHANNEL_IDS)} channels: {cleaned_text[:30]}...")
+                    logger.info(f"Forwarded cleaned text message (removed web preview) to {len(TARGET_CHANNEL_IDS)} channels: {cleaned_text[:30]}...")
                 else:
-                    logger.info("Message was empty after cleaning, skipped")
+                    logger.info("Message was empty after cleaning and removing web preview, skipped")
+        
+        # Handle text-only messages
         elif cleaned_text:
-            # If it's a text-only message and there's content after cleaning, send it
             for target_id in TARGET_CHANNEL_IDS:
                 await client.send_message(target_id, cleaned_text)
             logger.info(f"Forwarded cleaned text message to {len(TARGET_CHANNEL_IDS)} channels: {cleaned_text[:30]}...")
