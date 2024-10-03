@@ -9,7 +9,8 @@ from io import BytesIO
 from credentials import API_ID, API_HASH, SOURCE_CHANNEL_IDS, TARGET_CHANNEL_IDS
 
 from telethon import TelegramClient, events
-from telethon.tl.types import InputPeerChannel, InputPeerUser, MessageMediaPhoto, MessageMediaDocument, InputMediaUploadedPhoto, MessageMediaWebPage
+from telethon.tl.types import InputPeerChannel, InputPeerUser, MessageMediaPhoto, MessageMediaDocument, InputMediaUploadedPhoto, MessageMediaWebPage, InputMediaUploadedDocument
+from telethon.tl.functions.messages import UploadMediaRequest
 
 # Import the delay configuration
 from config import get_delay_seconds
@@ -36,6 +37,9 @@ message_queue = asyncio.Queue()
 # Last forwarded message time
 last_forward_time = datetime.now() - timedelta(seconds=get_delay_seconds())
 
+# Forbidden words
+FORBIDDEN_WORDS = ["advertise", "omwamba", "eliking"]
+
 def remove_usernames_and_links(text):
     if text is None:
         return None
@@ -53,10 +57,37 @@ def remove_usernames_and_links(text):
     
     return text
 
+def contains_forbidden_words(text, channel_name):
+    if text is None:
+        return False
+    
+    text_lower = text.lower()
+    channel_name_lower = channel_name.lower()
+    
+    # Check for channel name similarity
+    if channel_name_lower in text_lower:
+        return True
+    
+    # Check for forbidden words
+    for word in FORBIDDEN_WORDS:
+        if word in text_lower:
+            return True
+    
+    return False
+
 async def process_message(message):
     try:
         # Clean the text content
         cleaned_text = remove_usernames_and_links(message.text) if message.text else ""
+        
+        # Get the source channel name
+        source_channel = await client.get_entity(message.peer_id.channel_id)
+        source_channel_name = source_channel.title
+        
+        # Check for forbidden words
+        if contains_forbidden_words(cleaned_text, source_channel_name):
+            logger.info(f"Message contains forbidden words or channel name, skipped: {cleaned_text[:30]}...")
+            return
         
         # Check if the message has a web page preview
         if isinstance(message.media, MessageMediaWebPage):
@@ -70,7 +101,7 @@ async def process_message(message):
             return
 
         if message.media and not isinstance(message.media, MessageMediaWebPage):
-            # Download the media (for non-web page media)
+            # Download the media
             media_file = await message.download_media(file=BytesIO())
             
             if media_file:
@@ -79,21 +110,28 @@ async def process_message(message):
                     # Send as compressed photo
                     uploaded_file = await client.upload_file(media_file, part_size_kb=512)
                     uploaded_media = InputMediaUploadedPhoto(uploaded_file)
-                    for target_id in TARGET_CHANNEL_IDS:
-                        await client.send_file(
-                            target_id,
-                            file=uploaded_media,
-                            caption=cleaned_text
-                        )
+                elif isinstance(message.media, MessageMediaDocument):
+                    # Send as compressed document (video, gif, etc.)
+                    attributes = message.media.document.attributes
+                    uploaded_file = await client.upload_file(media_file, part_size_kb=512)
+                    uploaded_media = InputMediaUploadedDocument(
+                        file=uploaded_file,
+                        mime_type=message.media.document.mime_type,
+                        attributes=attributes,
+                        force_file=False
+                    )
                 else:
                     # For other types of media, send as is
-                    for target_id in TARGET_CHANNEL_IDS:
-                        await client.send_file(
-                            target_id,
-                            file=media_file,
-                            caption=cleaned_text
-                        )
-                logger.info(f"Forwarded media message with cleaned caption to {len(TARGET_CHANNEL_IDS)} channels: {cleaned_text[:30] if cleaned_text else 'No caption'}...")
+                    uploaded_media = media_file
+
+                for target_id in TARGET_CHANNEL_IDS:
+                    await client.send_file(
+                        target_id,
+                        file=uploaded_media,
+                        caption=cleaned_text,
+                        force_document=False
+                    )
+                logger.info(f"Forwarded compressed media message with cleaned caption to {len(TARGET_CHANNEL_IDS)} channels: {cleaned_text[:30] if cleaned_text else 'No caption'}...")
             else:
                 logger.warning("Failed to download media, sending as text-only message")
                 if cleaned_text:
